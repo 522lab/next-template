@@ -86,15 +86,29 @@ Then `/admin` becomes reachable (gated by `app/admin/layout.tsx`).
 
 1. Register a product in the Stripe dashboard, then a **recurring price**. Copy its `price_id` (`price_...`).
 2. Post to `/api/stripe/checkout` with `{ "price_id": "price_..." }`. Response: `{ "url": "..." }` — redirect there.
-3. For local webhook testing:
+3. **Local webhook forwarding** (so your webhook handler runs on test purchases):
 
    ```bash
-   stripe listen --forward-to localhost:3000/api/stripe/webhook
+   # in one terminal — dev server
+   npm run dev
+
+   # in another — forward events to localhost
+   doppler run -- ./scripts/stripe-listen.sh
+   # or, if not using Doppler:
+   source .env.local && ./scripts/stripe-listen.sh
    ```
 
-   Copy the `whsec_...` it prints into `STRIPE_WEBHOOK_SECRET`.
+   The script reads `STRIPE_SECRET_KEY` and runs `stripe listen` without the interactive `stripe login` pairing. It prints a `whsec_*` — copy it into Doppler (or `.env.local`) as `STRIPE_WEBHOOK_SECRET`, then restart the dev server.
 
-4. In production, register the webhook at `https://<your-domain>/api/stripe/webhook` for the events `checkout.session.completed`, `customer.subscription.updated`, `customer.subscription.deleted`.
+4. **Trigger a test event:**
+
+   ```bash
+   stripe trigger checkout.session.completed
+   ```
+
+   Your webhook will fire, verify the signature, and upsert into `stripe_events`.
+
+5. **In production**, register a real endpoint at `https://<your-domain>/api/stripe/webhook` for `checkout.session.completed`, `customer.subscription.updated`, `customer.subscription.deleted`. Stripe gives you the production `whsec_*` there.
 
 ## PWA icons
 
