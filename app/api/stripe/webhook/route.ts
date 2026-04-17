@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import type Stripe from 'stripe';
-import { stripe } from '@/lib/stripe';
+import { getStripe } from '@/lib/stripe';
+import { getSupabaseAdmin } from '@/lib/supabase/admin';
 
 export const runtime = 'nodejs';
 
@@ -19,7 +20,7 @@ export async function POST(request: NextRequest) {
 
   let event: Stripe.Event;
   try {
-    event = stripe.webhooks.constructEvent(rawBody, signature, webhookSecret);
+    event = getStripe().webhooks.constructEvent(rawBody, signature, webhookSecret);
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Invalid signature';
     return NextResponse.json(
@@ -28,32 +29,34 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  switch (event.type) {
-    case 'checkout.session.completed': {
-      const session = event.data.object as Stripe.Checkout.Session;
-      // TODO: persist subscription mapping to your database
-      console.log('[stripe] checkout.session.completed', session.id);
-      break;
-    }
-    case 'customer.subscription.updated': {
-      const subscription = event.data.object as Stripe.Subscription;
-      console.log(
-        '[stripe] customer.subscription.updated',
-        subscription.id,
-        subscription.status
+  // Idempotent insert. Stripe retries any event that doesn't 2xx within a timeout,
+  // so the same event.id can arrive multiple times. The PK + ignoreDuplicates
+  // make replays a no-op.
+  if (process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY) {
+    const { error } = await getSupabaseAdmin()
+      .from('stripe_events')
+      .upsert(
+        {
+          id: event.id,
+          type: event.type,
+          payload: event as unknown as Record<string, unknown>,
+        },
+        { onConflict: 'id', ignoreDuplicates: true }
       );
-      break;
-    }
-    case 'customer.subscription.deleted': {
-      const subscription = event.data.object as Stripe.Subscription;
-      console.log('[stripe] customer.subscription.deleted', subscription.id);
-      break;
-    }
-    default: {
-      // Ignore unhandled event types; returning 200 tells Stripe we received it.
-      console.log('[stripe] unhandled event', event.type);
+    if (error) {
+      // Don't fail the webhook on a DB glitch — Stripe will retry if we 5xx,
+      // but we've already verified the signature. Logging lets ops catch the gap.
+      console.error('[stripe] failed to persist event', event.id, error.message);
     }
   }
+
+  // Add type-specific side effects below as ventures grow. Keep them idempotent —
+  // the same event may arrive twice.
+  //
+  // switch (event.type) {
+  //   case 'checkout.session.completed': { ... }
+  //   case 'customer.subscription.updated': { ... }
+  // }
 
   return NextResponse.json({ received: true });
 }
